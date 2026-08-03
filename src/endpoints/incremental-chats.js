@@ -1,8 +1,8 @@
 /**
- * Express router for incremental chat save endpoints.
+ * Express router for incremental chat save and load endpoints.
  *
  * Registers under `/api/chats` alongside the existing chatsRouter.
- * New routes: /append, /patch, /meta/patch (+ group variants).
+ * New routes: /append, /patch, /meta/patch, /get-delta (+ group variants).
  *
  * Architecture: this file is the only integration point with Express.
  * Core logic lives in src/incremental/*.js (pure functions, fully unit-tested).
@@ -15,6 +15,7 @@ import sanitize from 'sanitize-filename';
 import { appendMessages } from '../incremental/append.js';
 import { patchMessages } from '../incremental/patch.js';
 import { patchMetadata } from '../incremental/meta.js';
+import { getChatDelta } from '../incremental/delta.js';
 import { isPathUnderParent } from '../util.js';
 
 export const router = express.Router();
@@ -325,5 +326,64 @@ router.post('/group/meta/patch', async function (request, response) {
         }
         console.error('POST /api/chats/group/meta/patch error:', error);
         return response.status(500).send({ error: 'Internal server error.' });
+    }
+});
+
+// ─── Delta (Incremental Load) Endpoints ─────────────────────────────────────
+
+router.post('/get-delta', async function (request, response) {
+    try {
+        const avatarUrl = request.body.avatar_url;
+        if (!avatarUrl) {
+            return response.status(400).send({ error: 'Missing avatar_url.' });
+        }
+        const cardName = String(avatarUrl).replace('.png', '');
+        const fileName = String(request.body.file_name || '').trim();
+        if (!fileName) {
+            return response.send({
+                chat: [], chat_metadata: {}, from_index: 0,
+                next_index: 0, total_messages: 0, has_more: false, integrity: '',
+            });
+        }
+
+        const chatFileName = fileName.endsWith('.jsonl') ? fileName : `${fileName}.jsonl`;
+        const chatFilePath = path.join(request.user.directories.chats, cardName, sanitize(chatFileName));
+        if (!isPathUnderParent(request.user.directories.chats, chatFilePath)) {
+            return response.sendStatus(400);
+        }
+
+        const fromIndex = Number(request.body.from_index) || 0;
+        const limit = Number(request.body.limit) || 0;
+
+        const result = getChatDelta({ chatFilePath, fromIndex, limit });
+        return response.send(result);
+    } catch (error) {
+        console.error('POST /api/chats/get-delta error:', error);
+        return response.send({
+            chat: [], chat_metadata: {}, from_index: 0,
+            next_index: 0, total_messages: 0, has_more: false, integrity: '',
+        });
+    }
+});
+
+router.post('/group/get-delta', async function (request, response) {
+    try {
+        const id = request.body.id;
+        if (!id) {
+            return response.status(400).send({ error: 'Missing group chat id.' });
+        }
+
+        const chatFilePath = path.join(request.user.directories.groupChats, sanitize(`${id}.jsonl`));
+        const fromIndex = Number(request.body.from_index) || 0;
+        const limit = Number(request.body.limit) || 0;
+
+        const result = getChatDelta({ chatFilePath, fromIndex, limit });
+        return response.send(result);
+    } catch (error) {
+        console.error('POST /api/chats/group/get-delta error:', error);
+        return response.send({
+            chat: [], chat_metadata: {}, from_index: 0,
+            next_index: 0, total_messages: 0, has_more: false, integrity: '',
+        });
     }
 });
