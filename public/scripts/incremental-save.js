@@ -4,11 +4,18 @@
  * Provides append/patch/meta operations that transfer only changed data,
  * dramatically reducing bandwidth on high-latency connections.
  *
- * Design: this module is self-contained. It exposes:
+ * Design: this module is self-contained with ZERO imports from script.js
+ * to avoid circular dependency (script.js imports us, we can't import it back).
+ * The CSRF token is passed in via setCsrfToken() during initialization.
+ *
+ * Exports:
  *   - appendChatMessages(messages) → Promise<boolean>
  *   - patchChatMessages(operations) → Promise<boolean>
  *   - saveChatMetadataIncremental(metadata) → Promise<boolean>
- *   - initIncrementalSave(integrity) — seed integrity from loaded chat
+ *   - initIncrementalSave(integrity, chatLength) — seed from loaded chat
+ *   - tryIncrementalSave(context) — intelligent routing
+ *   - markMessageEdited(index) — track edits for patch routing
+ *   - setCsrfToken(token) — set CSRF token for requests
  *   - isIncrementalSaveEnabled() → boolean
  *
  * Returns true on success; false signals the caller to fallback to full save.
@@ -20,9 +27,13 @@
  *   - Luker's patchChatMessages: public/script.js:13823
  */
 
-import { getRequestHeaders } from './RossAscends-mods.js';
+// No imports from script.js to avoid circular dependency.
+// CSRF token is injected via setCsrfToken().
 
 // ─── State ──────────────────────────────────────────────────────────────────
+
+/** @type {string} CSRF token for API requests. */
+let csrfToken = '';
 
 /** @type {string} Current integrity slug cached from last successful write or initial load. */
 let currentIntegrity = '';
@@ -32,6 +43,25 @@ let writeQueue = Promise.resolve();
 
 /** @type {boolean} Feature toggle — disabled if server doesn't support incremental endpoints. */
 let enabled = true;
+
+/**
+ * Build request headers (Content-Type + CSRF). Self-contained, no external imports.
+ * @returns {object}
+ */
+function getHeaders() {
+    return {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': csrfToken,
+    };
+}
+
+/**
+ * Set the CSRF token. Called from script.js after token is obtained.
+ * @param {string} token
+ */
+export function setCsrfToken(token) {
+    csrfToken = token || '';
+}
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -154,7 +184,7 @@ async function appendInternal(messages, context) {
         const response = await fetch(url, {
             method: 'POST',
             cache: 'no-cache',
-            headers: getRequestHeaders(),
+            headers: getHeaders(),
             body: JSON.stringify(body),
         });
 
@@ -221,7 +251,7 @@ async function patchInternal(operations, context) {
         const response = await fetch(url, {
             method: 'POST',
             cache: 'no-cache',
-            headers: getRequestHeaders(),
+            headers: getHeaders(),
             body: JSON.stringify(body),
         });
 
@@ -285,7 +315,7 @@ async function metaPatchInternal(metadata, context) {
         const response = await fetch(url, {
             method: 'POST',
             cache: 'no-cache',
-            headers: getRequestHeaders(),
+            headers: getHeaders(),
             body: JSON.stringify(body),
         });
 

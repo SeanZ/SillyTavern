@@ -14,7 +14,7 @@
  *   - Luker's bootstrap: src/endpoints/bootstrap.js
  */
 
-import { getRequestHeaders } from './RossAscends-mods.js';
+import { getRequestHeaders } from '../script.js';
 
 // ─── Chat Delta Loading ─────────────────────────────────────────────────────
 

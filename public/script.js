@@ -286,7 +286,7 @@ import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { compressRequest, setRequestCompressionConfig } from './scripts/request-compression.js';
-import { initIncrementalSave, appendChatMessages, patchChatMessages, saveChatMetadataIncremental, isIncrementalSaveEnabled, tryIncrementalSave, notifyFullSaveCompleted, resetIncrementalState, markMessageEdited } from './scripts/incremental-save.js';
+import { initIncrementalSave, appendChatMessages, patchChatMessages, saveChatMetadataIncremental, isIncrementalSaveEnabled, tryIncrementalSave, notifyFullSaveCompleted, resetIncrementalState, markMessageEdited, setCsrfToken } from './scripts/incremental-save.js';
 import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
 // API OBJECT FOR EXTERNAL WIRING
@@ -695,6 +695,7 @@ async function firstLoadInit() {
         const tokenResponse = await fetch('/csrf-token');
         const tokenData = await tokenResponse.json();
         token = tokenData.token;
+        setCsrfToken(token);
     } catch {
         toastr.error(t`Couldn't get CSRF token. Please refresh the page.`, t`Error`, { timeOut: 0, extendedTimeOut: 0, preventDuplicates: true });
         throw new Error('Initialization failed');
