@@ -1,4 +1,5 @@
 import { Fuse } from '../lib.js';
+import { initIncrementalSave } from './incremental-save.js';
 
 import {
     shuffle,
@@ -277,6 +278,7 @@ export async function getGroupChat(groupId, reload = false) {
     if (!metadata.integrity) {
         metadata.integrity = uuidv4();
     }
+    initIncrementalSave(metadata.integrity);
 
     await loadItemizedPrompts(getCurrentChatId());
 
