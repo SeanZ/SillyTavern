@@ -17,12 +17,13 @@ import { patchMessages } from '../incremental/patch.js';
 import { patchMetadata } from '../incremental/meta.js';
 import { getChatDelta } from '../incremental/delta.js';
 import { isPathUnderParent } from '../util.js';
+import validateAvatarUrlMiddleware from '../middleware/validateFileName.js';
 
 export const router = express.Router();
 
 // ─── Character Chat Endpoints ───────────────────────────────────────────────
 
-router.post('/append', async function (request, response) {
+router.post('/append', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         const avatarUrl = request.body.avatar_url;
         if (!avatarUrl) {
@@ -79,7 +80,7 @@ router.post('/append', async function (request, response) {
     }
 });
 
-router.post('/patch', async function (request, response) {
+router.post('/patch', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         const avatarUrl = request.body.avatar_url;
         if (!avatarUrl) {
@@ -139,7 +140,7 @@ router.post('/patch', async function (request, response) {
     }
 });
 
-router.post('/meta/patch', async function (request, response) {
+router.post('/meta/patch', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         const avatarUrl = request.body.avatar_url;
         if (!avatarUrl) {
@@ -331,7 +332,7 @@ router.post('/group/meta/patch', async function (request, response) {
 
 // ─── Delta (Incremental Load) Endpoints ─────────────────────────────────────
 
-router.post('/get-delta', async function (request, response) {
+router.post('/get-delta', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         const avatarUrl = request.body.avatar_url;
         if (!avatarUrl) {

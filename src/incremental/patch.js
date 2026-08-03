@@ -116,7 +116,6 @@ function setNestedValue(obj, parts, value) {
  */
 export function patchMessages({ chatFilePath, operations, integrity = '', force = false }) {
     if (!Array.isArray(operations) || operations.length === 0) {
-        const currentIntegrity = require ? '' : '';
         return { applied: 0, totalMessages: 0, integrity: '' };
     }
 

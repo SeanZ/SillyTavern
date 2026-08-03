@@ -286,7 +286,7 @@ import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { compressRequest, setRequestCompressionConfig } from './scripts/request-compression.js';
-import { initIncrementalSave, appendChatMessages, patchChatMessages, saveChatMetadataIncremental, isIncrementalSaveEnabled, tryIncrementalSave, notifyFullSaveCompleted, resetIncrementalState, markMessageEdited, setCsrfToken } from './scripts/incremental-save.js';
+import { initIncrementalSave, appendChatMessages, patchChatMessages, saveChatMetadataIncremental, isIncrementalSaveEnabled, tryIncrementalSave, notifyFullSaveCompleted, resetIncrementalState, markMessageEdited, setCsrfToken, getIntegrity } from './scripts/incremental-save.js';
 import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
 // API OBJECT FOR EXTERNAL WIRING
@@ -9381,6 +9381,14 @@ export async function saveChatConditional() {
             groupId: groupChatId,
         };
         const incrementalOk = await tryIncrementalSave(incrementalContext);
+
+        if (incrementalOk) {
+            // Sync integrity back to chat_metadata so full-save fallback stays consistent
+            const latestIntegrity = getIntegrity();
+            if (latestIntegrity) {
+                chat_metadata.integrity = latestIntegrity;
+            }
+        }
 
         if (!incrementalOk) {
             // Fallback: full save (original behavior)

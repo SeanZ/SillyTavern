@@ -112,12 +112,19 @@ export function appendMessages({ chatFilePath, messages, chatMetadata = {}, inte
     const dedupedMessages = [...messages];
     let skipped = 0;
 
-    if (lastMessage && dedupedMessages.length > 0) {
+    // Dedup loop: continuously drop leading messages that match the last stored
+    // message (handles multi-message retry scenarios). Matches Luker's while-loop
+    // dedup pattern.
+    if (lastMessage) {
         const lastStripped = stripTransientFields(lastMessage);
-        const firstNewStripped = stripTransientFields(dedupedMessages[0]);
-        if (_.isEqual(lastStripped, firstNewStripped)) {
-            dedupedMessages.shift();
-            skipped++;
+        while (dedupedMessages.length > 0) {
+            const firstNewStripped = stripTransientFields(dedupedMessages[0]);
+            if (_.isEqual(lastStripped, firstNewStripped)) {
+                dedupedMessages.shift();
+                skipped++;
+            } else {
+                break;
+            }
         }
     }
 
