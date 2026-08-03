@@ -4,31 +4,33 @@
  * Provides append/patch/meta operations that transfer only changed data,
  * dramatically reducing bandwidth on high-latency connections.
  *
- * Design: this module is self-contained with ZERO imports from script.js
- * to avoid circular dependency (script.js imports us, we can't import it back).
- * The CSRF token is passed in via setCsrfToken() during initialization.
+ * Architecture (aligned with Luker's proven pattern):
+ *   - Point-of-origin writes: callers invoke appendChatMessages/patchChatMessages
+ *     at the exact point where a message is created or modified.
+ *   - Snapshot-on-call: messages/operations are deep-cloned immediately on call,
+ *     before being enqueued, preventing race conditions with streaming/swipe/plugins.
+ *   - Unified write queue: all writes serialize through runSerializedChatWrite,
+ *     guaranteeing strict sequential ordering.
+ *
+ * Design: this module has ZERO imports from script.js to avoid circular dependency.
+ * Context (avatarUrl, fileName, groupId, chatMetadata) is resolved via a
+ * contextResolver function injected by script.js at init time.
  *
  * Exports:
+ *   - runSerializedChatWrite(task) — unified write queue
  *   - appendChatMessages(messages) → Promise<boolean>
  *   - patchChatMessages(operations) → Promise<boolean>
  *   - saveChatMetadataIncremental(metadata) → Promise<boolean>
- *   - initIncrementalSave(integrity, chatLength) — seed from loaded chat
- *   - tryIncrementalSave(context) — intelligent routing
- *   - markMessageEdited(index) — track edits for patch routing
+ *   - initIncrementalSave(integrity) — seed integrity from loaded chat
  *   - setCsrfToken(token) — set CSRF token for requests
+ *   - setContextResolver(resolver) — inject context resolver from script.js
  *   - isIncrementalSaveEnabled() → boolean
+ *   - getIntegrity() → string
  *
  * Returns true on success; false signals the caller to fallback to full save.
- * All writes are serialized through a queue to prevent concurrent conflicts.
- *
- * References:
- *   - Luker's runSerializedChatWrite: public/script.js:12127
- *   - Luker's appendChatMessages: public/script.js:13686
- *   - Luker's patchChatMessages: public/script.js:13823
  */
 
 // No imports from script.js to avoid circular dependency.
-// CSRF token is injected via setCsrfToken().
 
 // ─── State ──────────────────────────────────────────────────────────────────
 
@@ -38,22 +40,16 @@ let csrfToken = '';
 /** @type {string} Current integrity slug cached from last successful write or initial load. */
 let currentIntegrity = '';
 
-/** @type {Promise<any>} Serialized write queue — each write waits for previous to complete. */
-let writeQueue = Promise.resolve();
+/** @type {Promise<any>} Unified write queue — each write waits for previous to complete. */
+let chatWriteQueue = Promise.resolve();
 
 /** @type {boolean} Feature toggle — disabled if server doesn't support incremental endpoints. */
 let enabled = true;
 
-/**
- * Build request headers (Content-Type + CSRF). Self-contained, no external imports.
- * @returns {object}
- */
-function getHeaders() {
-    return {
-        'Content-Type': 'application/json',
-        'X-CSRF-Token': csrfToken,
-    };
-}
+/** @type {(() => {avatarUrl?: string, fileName?: string, groupId?: string, chatMetadata?: object}) | null} */
+let contextResolver = null;
+
+// ─── Initialization ─────────────────────────────────────────────────────────
 
 /**
  * Set the CSRF token. Called from script.js after token is obtained.
@@ -63,17 +59,22 @@ export function setCsrfToken(token) {
     csrfToken = token || '';
 }
 
-// ─── Public API ─────────────────────────────────────────────────────────────
+/**
+ * Inject the context resolver function. Called from script.js at init time.
+ * The resolver returns the current chat target info (avatarUrl, fileName, groupId, chatMetadata).
+ * @param {() => {avatarUrl?: string, fileName?: string, groupId?: string, chatMetadata?: object}} resolver
+ */
+export function setContextResolver(resolver) {
+    contextResolver = typeof resolver === 'function' ? resolver : null;
+}
 
 /**
  * Initialize the integrity slug from chat_metadata when a chat is loaded.
  * Called once after /api/chats/get or /api/chats/group/get returns.
  * @param {string} [integrity] - The integrity slug from chat_metadata.
- * @param {number} [chatLength=0] - Current chat.length at load time.
  */
-export function initIncrementalSave(integrity, chatLength = 0) {
+export function initIncrementalSave(integrity) {
     currentIntegrity = typeof integrity === 'string' ? integrity.trim() : '';
-    lastSavedChatLength = chatLength;
     enabled = true; // Re-enable on chat switch (may have been disabled by 404)
 }
 
@@ -93,76 +94,127 @@ export function getIntegrity() {
     return currentIntegrity;
 }
 
+// ─── Unified Write Queue ────────────────────────────────────────────────────
+
+/**
+ * Serialized write queue. ALL chat write operations (append, patch, metadata,
+ * and full saves) should be enqueued through this function to prevent concurrent
+ * writes from interleaving or racing.
+ *
+ * Each new task waits for the previous one to settle before executing.
+ * Errors are swallowed between tasks to prevent a failed write from blocking
+ * subsequent writes.
+ *
+ * @param {() => Promise<any>} task - Async function to execute.
+ * @returns {Promise<any>}
+ */
+export function runSerializedChatWrite(task) {
+    if (typeof task !== 'function') {
+        return Promise.resolve(undefined);
+    }
+    const run = chatWriteQueue
+        .catch(() => undefined)
+        .then(() => task());
+    chatWriteQueue = run.catch(() => undefined);
+    return run;
+}
+
+// ─── Public API ─────────────────────────────────────────────────────────────
+
 /**
  * Append new messages to the current chat via incremental endpoint.
- * Serialized through the write queue to prevent concurrent requests.
+ * Messages are deep-cloned immediately (snapshot-on-call) before enqueuing.
  *
- * @param {object[]} messages - Messages to append.
- * @param {object} context - Chat context for routing.
- * @param {string} [context.avatarUrl] - Character avatar filename (character chats).
- * @param {string} [context.fileName] - Chat file name (character chats).
- * @param {string} [context.groupId] - Group chat ID (group chats).
- * @param {object} [context.chatMetadata] - Current chat_metadata object.
+ * @param {object[]} messages - Messages to append (will be cloned).
  * @returns {Promise<boolean>} True if appended successfully, false to fallback.
  */
-export function appendChatMessages(messages, context) {
-    if (!enabled || !messages || messages.length === 0) {
+export function appendChatMessages(messages) {
+    if (!enabled || !Array.isArray(messages) || messages.length === 0) {
         return Promise.resolve(false);
     }
-    return runSerializedWrite(() => appendInternal(messages, context));
+    // Snapshot-on-call: deep-clone before enqueuing to prevent mutation during async window
+    const cloned = JSON.parse(JSON.stringify(messages));
+    return runSerializedChatWrite(() => appendInternal(cloned));
 }
 
 /**
  * Patch existing messages in the current chat via incremental endpoint.
+ * Operations are deep-cloned immediately (snapshot-on-call) before enqueuing.
  *
- * @param {object[]} operations - JSON Patch-style operations.
- * @param {object} context - Chat context for routing.
+ * @param {object[]} operations - JSON Patch-style operations (will be cloned).
  * @returns {Promise<boolean>} True if patched successfully, false to fallback.
  */
-export function patchChatMessages(operations, context) {
-    if (!enabled || !operations || operations.length === 0) {
+export function patchChatMessages(operations) {
+    if (!enabled || !Array.isArray(operations) || operations.length === 0) {
         return Promise.resolve(false);
     }
-    return runSerializedWrite(() => patchInternal(operations, context));
+    const cloned = JSON.parse(JSON.stringify(operations));
+    return runSerializedChatWrite(() => patchInternal(cloned));
 }
 
 /**
  * Patch chat metadata (deep merge) via incremental endpoint.
+ * Metadata is deep-cloned immediately before enqueuing.
  *
- * @param {object} metadata - Fields to merge into chat_metadata.
- * @param {object} context - Chat context for routing.
+ * @param {object} metadata - Fields to merge into chat_metadata (will be cloned).
  * @returns {Promise<boolean>} True if patched successfully, false to fallback.
  */
-export function saveChatMetadataIncremental(metadata, context) {
+export function saveChatMetadataIncremental(metadata) {
     if (!enabled || !metadata || typeof metadata !== 'object') {
         return Promise.resolve(false);
     }
-    return runSerializedWrite(() => metaPatchInternal(metadata, context));
+    const cloned = JSON.parse(JSON.stringify(metadata));
+    return runSerializedChatWrite(() => metaPatchInternal(cloned));
+}
+
+// ─── Internal Helpers ───────────────────────────────────────────────────────
+
+/**
+ * Build request headers (Content-Type + CSRF).
+ * @returns {object}
+ */
+function getHeaders() {
+    return {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': csrfToken,
+    };
+}
+
+/**
+ * Resolve the current chat context from the injected resolver.
+ * Returns null if resolver is not set or returns invalid data.
+ * @returns {{avatarUrl?: string, fileName?: string, groupId?: string, chatMetadata?: object} | null}
+ */
+function resolveCurrentContext() {
+    if (!contextResolver) return null;
+    try {
+        return contextResolver();
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Apply the new integrity slug returned from a successful write.
+ * @param {string} [integrity]
+ */
+function applyIntegrity(integrity) {
+    if (typeof integrity === 'string' && integrity.trim()) {
+        currentIntegrity = integrity.trim();
+    }
 }
 
 // ─── Internal Implementation ────────────────────────────────────────────────
 
 /**
- * Serialized write queue (same pattern as Luker's runSerializedChatWrite).
- * Ensures only one write request is in-flight at a time for the current chat.
- * @param {() => Promise<boolean>} task
+ * @param {object[]} messages - Already-cloned messages to append.
  * @returns {Promise<boolean>}
  */
-function runSerializedWrite(task) {
-    const run = writeQueue
-        .catch(() => undefined)
-        .then(() => task());
-    writeQueue = run.catch(() => undefined);
-    return run;
-}
-
-/**
- * @param {object[]} messages
- * @param {object} context
- * @returns {Promise<boolean>}
- */
-async function appendInternal(messages, context) {
+async function appendInternal(messages) {
     try {
+        const context = resolveCurrentContext();
+        if (!context) return false;
+
         const isGroup = Boolean(context.groupId);
         const url = isGroup ? '/api/chats/group/append' : '/api/chats/append';
 
@@ -200,10 +252,8 @@ async function appendInternal(messages, context) {
         }
 
         if (response.status === 409) {
-            // Integrity conflict — caller should fallback to full save.
             const payload = await response.json().catch(() => ({}));
             console.warn('[IncrementalSave] append 409 conflict, current:', payload.current_integrity);
-            // Update our integrity to what the server has, so next attempt aligns.
             if (payload.current_integrity) {
                 currentIntegrity = payload.current_integrity;
             }
@@ -211,7 +261,6 @@ async function appendInternal(messages, context) {
         }
 
         if (response.status === 404) {
-            // Endpoint not available — disable incremental save.
             console.warn('[IncrementalSave] append endpoint not found, disabling.');
             enabled = false;
             return false;
@@ -226,12 +275,14 @@ async function appendInternal(messages, context) {
 }
 
 /**
- * @param {object[]} operations
- * @param {object} context
+ * @param {object[]} operations - Already-cloned patch operations.
  * @returns {Promise<boolean>}
  */
-async function patchInternal(operations, context) {
+async function patchInternal(operations) {
     try {
+        const context = resolveCurrentContext();
+        if (!context) return false;
+
         const isGroup = Boolean(context.groupId);
         const url = isGroup ? '/api/chats/group/patch' : '/api/chats/patch';
 
@@ -290,12 +341,14 @@ async function patchInternal(operations, context) {
 }
 
 /**
- * @param {object} metadata
- * @param {object} context
+ * @param {object} metadata - Already-cloned metadata to merge.
  * @returns {Promise<boolean>}
  */
-async function metaPatchInternal(metadata, context) {
+async function metaPatchInternal(metadata) {
     try {
+        const context = resolveCurrentContext();
+        if (!context) return false;
+
         const isGroup = Boolean(context.groupId);
         const url = isGroup ? '/api/chats/group/meta/patch' : '/api/chats/meta/patch';
 
@@ -346,131 +399,5 @@ async function metaPatchInternal(metadata, context) {
     } catch (error) {
         console.warn('[IncrementalSave] meta/patch error:', error);
         return false;
-    }
-}
-
-/**
- * Apply the new integrity slug returned from a successful write.
- * @param {string} [integrity]
- */
-function applyIntegrity(integrity) {
-    if (typeof integrity === 'string' && integrity.trim()) {
-        currentIntegrity = integrity.trim();
-    }
-}
-
-// ─── Intelligent Save Routing ───────────────────────────────────────────────
-
-/** @type {number} Chat length after last successful save (used to detect appends). */
-let lastSavedChatLength = 0;
-
-/**
- * Notify the module that a full save completed successfully (from the legacy path).
- * This keeps lastSavedChatLength in sync even when incremental save isn't used.
- * @param {number} chatLength - Current chat.length after save.
- * @param {string} [integrity] - Integrity slug if returned by the server.
- */
-export function notifyFullSaveCompleted(chatLength, integrity) {
-    lastSavedChatLength = chatLength;
-    if (integrity) applyIntegrity(integrity);
-}
-
-/**
- * Try to perform an incremental save based on what changed.
- * Called from saveChatConditional() before the full-save fallback.
- *
- * Detection logic:
- * - chat.length > lastSavedChatLength → messages were appended → use /append
- * - chat.length < lastSavedChatLength → messages were deleted → use /patch (remove)
- * - chat.length === lastSavedChatLength → message edited or metadata changed → full save
- *   (field-level diff detection is too complex for Phase 1; leave for Phase 2)
- *
- * @param {object} params
- * @param {object[]} params.chat - The current chat array.
- * @param {object} params.chatMetadata - Current chat_metadata.
- * @param {string} [params.avatarUrl] - Character avatar (for character chats).
- * @param {string} [params.fileName] - Chat file name (for character chats).
- * @param {string} [params.groupId] - Group chat ID (for group chats).
- * @returns {Promise<boolean>} True if incremental save succeeded; false to fall through.
- */
-export async function tryIncrementalSave({ chat, chatMetadata, avatarUrl, fileName, groupId }) {
-    if (!enabled) return false;
-    if (!chat || !Array.isArray(chat)) return false;
-
-    const currentLength = chat.length;
-    const context = { avatarUrl, fileName, groupId, chatMetadata };
-
-    // Case 1: Messages were appended (most common — AI reply or user send)
-    if (currentLength > lastSavedChatLength && lastSavedChatLength > 0) {
-        const newMessages = chat.slice(lastSavedChatLength);
-        const ok = await appendChatMessages(newMessages, context);
-        if (ok) {
-            lastSavedChatLength = currentLength;
-            return true;
-        }
-        return false;
-    }
-
-    // Case 2: Messages were deleted
-    if (currentLength < lastSavedChatLength && lastSavedChatLength > 0) {
-        // Deletion is complex to express as patch ops without knowing which
-        // messages were removed. Fall through to full save for now.
-        // After full save completes, lastSavedChatLength will be updated.
-        pendingEditedIndices.clear();
-        return false;
-    }
-
-    // Case 3: Same length — check if we have tracked edits
-    if (currentLength === lastSavedChatLength && pendingEditedIndices.size > 0) {
-        // Build patch operations for each edited message
-        const operations = [];
-        for (const index of pendingEditedIndices) {
-            if (index >= 0 && index < chat.length) {
-                operations.push({ op: 'replace', path: `/${index}`, value: chat[index] });
-            }
-        }
-
-        if (operations.length > 0) {
-            const ok = await patchChatMessages(operations, context);
-            if (ok) {
-                pendingEditedIndices.clear();
-                return true;
-            }
-        }
-        // Patch failed — fall through to full save
-        pendingEditedIndices.clear();
-        return false;
-    }
-
-    // Case 4: Same length, no tracked edits — could be metadata-only or
-    // untracked change. Fall through to full save.
-    pendingEditedIndices.clear();
-    return false;
-}
-
-/**
- * Reset tracking state (called when switching chats).
- * @param {number} [chatLength=0]
- */
-export function resetIncrementalState(chatLength = 0) {
-    lastSavedChatLength = chatLength;
-    pendingEditedIndices.clear();
-}
-
-// ─── Message Edit Tracking ───────────────────────────────────────────────
-
-/** @type {Set<number>} Indices of messages modified since last save. */
-const pendingEditedIndices = new Set();
-
-/**
- * Mark a message as edited. Called by edit flows before saveChatDebounced().
- * When tryIncrementalSave detects same-length (no append/delete), it will
- * send patch operations for these indices instead of a full save.
- *
- * @param {number} index - The message index in chat[] that was edited.
- */
-export function markMessageEdited(index) {
-    if (typeof index === 'number' && index >= 0) {
-        pendingEditedIndices.add(index);
     }
 }

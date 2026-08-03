@@ -286,7 +286,7 @@ import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { compressRequest, setRequestCompressionConfig } from './scripts/request-compression.js';
-import { initIncrementalSave, appendChatMessages, patchChatMessages, saveChatMetadataIncremental, isIncrementalSaveEnabled, tryIncrementalSave, notifyFullSaveCompleted, resetIncrementalState, markMessageEdited, setCsrfToken, getIntegrity } from './scripts/incremental-save.js';
+import { initIncrementalSave, appendChatMessages, patchChatMessages, saveChatMetadataIncremental, isIncrementalSaveEnabled, runSerializedChatWrite, setCsrfToken, setContextResolver, getIntegrity } from './scripts/incremental-save.js';
 import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
 // API OBJECT FOR EXTERNAL WIRING
@@ -696,6 +696,12 @@ async function firstLoadInit() {
         const tokenData = await tokenResponse.json();
         token = tokenData.token;
         setCsrfToken(token);
+        setContextResolver(() => ({
+            avatarUrl: characters[this_chid]?.avatar,
+            fileName: characters[this_chid]?.chat,
+            groupId: selected_group ? groups.find(x => x.id == selected_group)?.chat_id : undefined,
+            chatMetadata: chat_metadata,
+        }));
     } catch {
         toastr.error(t`Couldn't get CSRF token. Please refresh the page.`, t`Error`, { timeOut: 0, extendedTimeOut: 0, preventDuplicates: true });
         throw new Error('Initialization failed');
@@ -3755,7 +3761,17 @@ class StreamingProcessor {
         if (!isAborted && power_user.auto_swipe && generatedTextFiltered(text)) {
             return await swipe(null, SWIPE_DIRECTION.RIGHT, { source: SWIPE_SOURCE.AUTO_SWIPE, repeated: true, forceMesId: chat.length - 1 });
         }
-        await saveChatConditional();
+
+        // Point-of-origin incremental save
+        if (!isAborted && this.type === 'normal') {
+            const appended = await appendChatMessages([chat[messageId]]);
+            if (!appended) await saveChatConditional();
+        } else if (!isAborted && (this.type === 'swipe' || this.type === 'continue')) {
+            const patched = await patchChatMessages([{ op: 'replace', path: `/${messageId}`, value: chat[messageId] }]);
+            if (!patched) await saveChatConditional();
+        } else {
+            await saveChatConditional();
+        }
 
         playMessageSound();
     }
@@ -5513,7 +5529,18 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         }
 
         console.debug('/api/chats/save called by /Generate');
-        await saveChatConditional();
+
+        // Point-of-origin incremental save
+        if (type === 'normal') {
+            const appended = await appendChatMessages([chat[chat.length - 1]]);
+            if (!appended) await saveChatConditional();
+        } else if (type === 'swipe' || type === 'continue' || type === 'appendFinal') {
+            const patched = await patchChatMessages([{ op: 'replace', path: `/${chat.length - 1}`, value: chat[chat.length - 1] }]);
+            if (!patched) await saveChatConditional();
+        } else {
+            await saveChatConditional();
+        }
+
         unblockGeneration(type);
         streamingProcessor = null;
 
@@ -5855,7 +5882,8 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, insertAt);
     } else {
         chat.push(message);
-        await saveChatConditional();
+        const appended = await appendChatMessages([message]);
+        if (!appended) await saveChatConditional();
         const chat_id = (chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_SENT, chat_id);
         addOneMessage(message);
@@ -6881,8 +6909,6 @@ export function syncMesToSwipe(messageId = null) {
     targetSwipeInfo.gen_finished = targetMessage.gen_finished;
     targetSwipeInfo.extra = structuredClone(targetMessage.extra);
 
-    markMessageEdited(targetMessageId);
-
     return true;
 }
 
@@ -7610,7 +7636,7 @@ export async function getChat() {
         if (!chat_metadata.integrity) {
             chat_metadata.integrity = uuidv4();
         }
-        initIncrementalSave(chat_metadata.integrity, chat.length);
+        initIncrementalSave(chat_metadata.integrity);
         await getChatResult();
         eventSource.emit(event_types.CHAT_LOADED, { detail: { id: this_chid, character: characters[this_chid] } });
 
@@ -8135,7 +8161,6 @@ function updateMessage(div) {
 
     chat_metadata.tainted = true;
 
-    markMessageEdited(Number(mesElement.attr('mesid')));
     return { mesBlock, text, mes, bias };
 }
 
@@ -9368,36 +9393,10 @@ export async function saveChatConditional() {
 
         isChatSaving = true;
 
-        // Try incremental save first (append only new messages).
-        // Falls through to full save on failure or when not applicable.
-        const groupChatId = selected_group
-            ? groups.find(x => x.id == selected_group)?.chat_id
-            : undefined;
-        const incrementalContext = {
-            chat,
-            chatMetadata: chat_metadata,
-            avatarUrl: characters[this_chid]?.avatar,
-            fileName: characters[this_chid]?.chat,
-            groupId: groupChatId,
-        };
-        const incrementalOk = await tryIncrementalSave(incrementalContext);
-
-        if (incrementalOk) {
-            // Sync integrity back to chat_metadata so full-save fallback stays consistent
-            const latestIntegrity = getIntegrity();
-            if (latestIntegrity) {
-                chat_metadata.integrity = latestIntegrity;
-            }
-        }
-
-        if (!incrementalOk) {
-            // Fallback: full save (original behavior)
-            if (selected_group) {
-                await saveGroupChat(selected_group, true);
-            } else {
-                await saveChat();
-            }
-            notifyFullSaveCompleted(chat.length);
+        if (selected_group) {
+            await saveGroupChat(selected_group, true);
+        } else {
+            await saveChat();
         }
 
         // Save token and prompts cache to IndexedDB storage
@@ -10021,7 +10020,14 @@ export async function swipe(event, direction, { source, repeated, message = chat
         }
 
         //Clamp Id between swipes.
-        let clampedId = clamp(chat[mesId].swipe_id, 0, Math.max(0, chat[mesId].swipes.length - 1));
+        const swipeMessage = chat[mesId];
+        if (!swipeMessage || !Array.isArray(swipeMessage.swipes)) {
+            console.warn(`[endSwipe] Message #${mesId} is no longer valid in chat. Aborting swipe finalization.`);
+            swipeState = SWIPE_STATE.NONE;
+            delete document.body.dataset.swiping;
+            return;
+        }
+        let clampedId = clamp(swipeMessage.swipe_id, 0, Math.max(0, swipeMessage.swipes.length - 1));
 
         await updateSwipeCounter(mesId);
         //Fallback.
