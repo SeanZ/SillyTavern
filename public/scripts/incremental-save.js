@@ -386,12 +386,35 @@ export async function tryIncrementalSave({ chat, chatMetadata, avatarUrl, fileNa
         // Deletion is complex to express as patch ops without knowing which
         // messages were removed. Fall through to full save for now.
         // After full save completes, lastSavedChatLength will be updated.
+        pendingEditedIndices.clear();
         return false;
     }
 
-    // Case 3: Same length — could be edit, swipe, or metadata-only change.
-    // Phase 1 doesn't do field-level diffing; fall through to full save.
-    // Future: compare chat[i] snapshots to generate targeted patch ops.
+    // Case 3: Same length — check if we have tracked edits
+    if (currentLength === lastSavedChatLength && pendingEditedIndices.size > 0) {
+        // Build patch operations for each edited message
+        const operations = [];
+        for (const index of pendingEditedIndices) {
+            if (index >= 0 && index < chat.length) {
+                operations.push({ op: 'replace', path: `/${index}`, value: chat[index] });
+            }
+        }
+
+        if (operations.length > 0) {
+            const ok = await patchChatMessages(operations, context);
+            if (ok) {
+                pendingEditedIndices.clear();
+                return true;
+            }
+        }
+        // Patch failed — fall through to full save
+        pendingEditedIndices.clear();
+        return false;
+    }
+
+    // Case 4: Same length, no tracked edits — could be metadata-only or
+    // untracked change. Fall through to full save.
+    pendingEditedIndices.clear();
     return false;
 }
 
@@ -401,4 +424,23 @@ export async function tryIncrementalSave({ chat, chatMetadata, avatarUrl, fileNa
  */
 export function resetIncrementalState(chatLength = 0) {
     lastSavedChatLength = chatLength;
+    pendingEditedIndices.clear();
+}
+
+// ─── Message Edit Tracking ───────────────────────────────────────────────
+
+/** @type {Set<number>} Indices of messages modified since last save. */
+const pendingEditedIndices = new Set();
+
+/**
+ * Mark a message as edited. Called by edit flows before saveChatDebounced().
+ * When tryIncrementalSave detects same-length (no append/delete), it will
+ * send patch operations for these indices instead of a full save.
+ *
+ * @param {number} index - The message index in chat[] that was edited.
+ */
+export function markMessageEdited(index) {
+    if (typeof index === 'number' && index >= 0) {
+        pendingEditedIndices.add(index);
+    }
 }

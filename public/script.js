@@ -286,7 +286,7 @@ import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { compressRequest, setRequestCompressionConfig } from './scripts/request-compression.js';
-import { initIncrementalSave, appendChatMessages, patchChatMessages, saveChatMetadataIncremental, isIncrementalSaveEnabled, tryIncrementalSave, notifyFullSaveCompleted, resetIncrementalState } from './scripts/incremental-save.js';
+import { initIncrementalSave, appendChatMessages, patchChatMessages, saveChatMetadataIncremental, isIncrementalSaveEnabled, tryIncrementalSave, notifyFullSaveCompleted, resetIncrementalState, markMessageEdited } from './scripts/incremental-save.js';
 import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
 // API OBJECT FOR EXTERNAL WIRING
@@ -6880,6 +6880,8 @@ export function syncMesToSwipe(messageId = null) {
     targetSwipeInfo.gen_finished = targetMessage.gen_finished;
     targetSwipeInfo.extra = structuredClone(targetMessage.extra);
 
+    markMessageEdited(targetMessageId);
+
     return true;
 }
 
@@ -8132,6 +8134,7 @@ function updateMessage(div) {
 
     chat_metadata.tainted = true;
 
+    markMessageEdited(Number(mesElement.attr('mesid')));
     return { mesBlock, text, mes, bias };
 }
 

@@ -27,6 +27,7 @@ import { router as charactersRouter } from './endpoints/characters.js';
 import { router as chatsRouter } from './endpoints/chats.js';
 import { router as incrementalChatsRouter } from './endpoints/incremental-chats.js';
 import { router as bootstrapRouter } from './endpoints/bootstrap.js';
+import { router as incrementalSettingsRouter } from './endpoints/incremental-settings.js';
 import { router as groupsRouter } from './endpoints/groups.js';
 import { router as worldInfoRouter } from './endpoints/worldinfo.js';
 import { router as statsRouter } from './endpoints/stats.js';
@@ -169,6 +170,7 @@ export function setupPrivateEndpoints(app) {
     app.use('/api/backgrounds', backgroundsRouter);
     app.use('/api/sprites', spritesRouter);
     app.use('/api/content', contentManagerRouter);
+    app.use('/api/settings', incrementalSettingsRouter);
     app.use('/api/settings', settingsRouter);
     app.use('/api/sd', stableDiffusionRouter);
     app.use('/api/horde', hordeRouter);

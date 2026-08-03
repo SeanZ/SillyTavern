@@ -252,7 +252,7 @@ performance:
   # Configures gzip compression for client requests with large payloads (e.g. settings or chat saves).
   requestCompression:
     # Enable request compression.
-    enabled: false
+    enabled: true
     # Minimum payload size to trigger compression. Set to 0 to compress all requests regardless of size.
     minPayloadSize: '256kb'
     # Hard upper payload size limit for compression. Set to 0 to allow compression of any size.
