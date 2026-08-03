@@ -70,7 +70,7 @@ const backupFunctions = new Map();
  * @param {string} handle User handle
  * @returns {typeof backupChat} Backup function
  */
-function getBackupFunction(handle) {
+export function getBackupFunction(handle) {
     if (!backupFunctions.has(handle)) {
         backupFunctions.set(handle, _.throttle(backupChat, throttleInterval, { leading: true, trailing: true }));
     }

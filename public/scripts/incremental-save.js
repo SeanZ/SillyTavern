@@ -204,6 +204,18 @@ function applyIntegrity(integrity) {
     }
 }
 
+/** @type {number} Monotonically increasing counter for generation IDs. */
+let generationCounter = 0;
+
+/**
+ * Generate a unique generation ID for retry-safe dedup.
+ * Combines a timestamp with a counter to ensure uniqueness even in rapid succession.
+ * @returns {string}
+ */
+function generateGenerationId() {
+    return `${Date.now()}-${++generationCounter}`;
+}
+
 // ─── Internal Implementation ────────────────────────────────────────────────
 
 /**
@@ -217,6 +229,7 @@ async function appendInternal(messages) {
 
         const isGroup = Boolean(context.groupId);
         const url = isGroup ? '/api/chats/group/append' : '/api/chats/append';
+        const genId = generateGenerationId();
 
         const body = isGroup
             ? {
@@ -224,6 +237,7 @@ async function appendInternal(messages) {
                 messages,
                 chat_metadata: context.chatMetadata || {},
                 integrity: currentIntegrity,
+                generation_id: genId,
             }
             : {
                 avatar_url: context.avatarUrl,
@@ -231,6 +245,7 @@ async function appendInternal(messages) {
                 messages,
                 chat_metadata: context.chatMetadata || {},
                 integrity: currentIntegrity,
+                generation_id: genId,
             };
 
         const response = await fetch(url, {

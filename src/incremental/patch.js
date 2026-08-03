@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import _ from 'lodash';
 import { validateIntegrity, writeIntegrity, generateIntegrity } from './integrity.js';
+import { tryWriteFileSync } from '../util.js';
 
 /**
  * Reads and parses a JSONL chat file into header + messages.
@@ -37,7 +38,7 @@ export function readChatFile(chatFilePath) {
  */
 export function writeChatFile(chatFilePath, header, messages) {
     const lines = [header, ...messages].map(m => JSON.stringify(m)).join('\n');
-    fs.writeFileSync(chatFilePath, lines, 'utf8');
+    tryWriteFileSync(chatFilePath, lines);
 }
 
 /**

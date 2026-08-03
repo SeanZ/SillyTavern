@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import _ from 'lodash';
 import { validateIntegrity, writeIntegrity, generateIntegrity } from './integrity.js';
+import { tryWriteFileSync } from '../util.js';
 
 /**
  * @typedef {Object} MetaPatchResult
@@ -78,7 +79,7 @@ export function patchMetadata({ chatFilePath, metadata, integrity = '', force = 
     // Write back: new header + unchanged rest
     const newHeaderLine = JSON.stringify(header);
     const newContent = newHeaderLine + rest;
-    fs.writeFileSync(chatFilePath, newContent, 'utf8');
+    tryWriteFileSync(chatFilePath, newContent);
 
     // Rotate integrity
     const newIntegrity = generateIntegrity();

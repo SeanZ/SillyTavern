@@ -9,6 +9,7 @@
  */
 
 import express from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
 import sanitize from 'sanitize-filename';
 
@@ -17,9 +18,75 @@ import { patchMessages } from '../incremental/patch.js';
 import { patchMetadata } from '../incremental/meta.js';
 import { getChatDelta } from '../incremental/delta.js';
 import { isPathUnderParent } from '../util.js';
+import { getBackupFunction } from './chats.js';
 import validateAvatarUrlMiddleware from '../middleware/validateFileName.js';
 
 export const router = express.Router();
+
+// ─── Generation ID Dedup (retry-safe, aligned with Luker) ────────────────────
+
+const GENERATION_ID_TTL_MS = 60_000;
+
+/** @type {Map<string, {value: string, timer: NodeJS.Timeout}>} */
+const lastGenerationIdByPath = new Map();
+
+/**
+ * Read the last-seen generation ID for a chat file path.
+ * @param {string} chatFilePath
+ * @returns {string}
+ */
+function readLastGenerationId(chatFilePath) {
+    const key = path.resolve(String(chatFilePath || ''));
+    if (!key) return '';
+    const entry = lastGenerationIdByPath.get(key);
+    return entry && typeof entry.value === 'string' ? entry.value : '';
+}
+
+/**
+ * Store a generation ID with a 60-second TTL. Used for retry dedup:
+ * if the same generation ID arrives again within the TTL window and content
+ * matches the last stored message, the append is treated as a duplicate.
+ * @param {string} chatFilePath
+ * @param {string} generationId
+ */
+function writeLastGenerationId(chatFilePath, generationId) {
+    const safeId = typeof generationId === 'string' ? generationId.trim() : '';
+    if (!safeId) return;
+    const key = path.resolve(String(chatFilePath || ''));
+    if (!key) return;
+    const previous = lastGenerationIdByPath.get(key);
+    if (previous?.timer) {
+        clearTimeout(previous.timer);
+    }
+    const timer = setTimeout(() => {
+        const current = lastGenerationIdByPath.get(key);
+        if (current && current.timer === timer) {
+            lastGenerationIdByPath.delete(key);
+        }
+    }, GENERATION_ID_TTL_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+    lastGenerationIdByPath.set(key, { value: safeId, timer });
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Trigger a throttled backup of the chat file after a successful incremental write.
+ * Reads the full file content and passes it to the user's backup function.
+ * Errors are logged but never propagate — backup failure must not break the write response.
+ * @param {string} chatFilePath - Absolute path to the .jsonl file.
+ * @param {string} handle - User handle for backup function lookup.
+ * @param {string} backupDirectory - User's backups directory.
+ * @param {string} cardName - Card/group name for backup file naming.
+ */
+function triggerBackup(chatFilePath, handle, backupDirectory, cardName) {
+    try {
+        const jsonlData = fs.readFileSync(chatFilePath, 'utf8');
+        getBackupFunction(handle)(backupDirectory, cardName, jsonlData);
+    } catch (err) {
+        console.error('[IncrementalChats] Backup after write failed:', err.message);
+    }
+}
 
 // ─── Character Chat Endpoints ───────────────────────────────────────────────
 
@@ -52,6 +119,8 @@ router.post('/append', validateAvatarUrlMiddleware, async function (request, res
         const integrity = typeof request.body.integrity === 'string' ? request.body.integrity.trim() : '';
         const force = Boolean(request.body.force);
         const chatMetadata = request.body.chat_metadata || {};
+        const generationId = typeof request.body.generation_id === 'string' ? request.body.generation_id.trim() : '';
+        const lastKnownGenerationId = readLastGenerationId(chatFilePath);
 
         const result = appendMessages({
             chatFilePath,
@@ -59,7 +128,15 @@ router.post('/append', validateAvatarUrlMiddleware, async function (request, res
             chatMetadata,
             integrity,
             force,
+            generationId,
+            lastKnownGenerationId,
         });
+
+        if (generationId && result.appended > 0) {
+            writeLastGenerationId(chatFilePath, generationId);
+        }
+
+        triggerBackup(chatFilePath, request.user.profile.handle, request.user.directories.backups, cardName);
 
         return response.send({
             ok: true,
@@ -115,6 +192,8 @@ router.post('/patch', validateAvatarUrlMiddleware, async function (request, resp
             integrity,
             force,
         });
+
+        triggerBackup(chatFilePath, request.user.profile.handle, request.user.directories.backups, cardName);
 
         return response.send({
             ok: true,
@@ -173,6 +252,8 @@ router.post('/meta/patch', validateAvatarUrlMiddleware, async function (request,
             force,
         });
 
+        triggerBackup(chatFilePath, request.user.profile.handle, request.user.directories.backups, cardName);
+
         return response.send({ ok: true, integrity: result.integrity });
     } catch (error) {
         if (error.code === 'INTEGRITY_CONFLICT') {
@@ -211,6 +292,8 @@ router.post('/group/append', async function (request, response) {
         const integrity = typeof request.body.integrity === 'string' ? request.body.integrity.trim() : '';
         const force = Boolean(request.body.force);
         const chatMetadata = request.body.chat_metadata || {};
+        const generationId = typeof request.body.generation_id === 'string' ? request.body.generation_id.trim() : '';
+        const lastKnownGenerationId = readLastGenerationId(chatFilePath);
 
         const result = appendMessages({
             chatFilePath,
@@ -218,7 +301,15 @@ router.post('/group/append', async function (request, response) {
             chatMetadata,
             integrity,
             force,
+            generationId,
+            lastKnownGenerationId,
         });
+
+        if (generationId && result.appended > 0) {
+            writeLastGenerationId(chatFilePath, generationId);
+        }
+
+        triggerBackup(chatFilePath, request.user.profile.handle, request.user.directories.backups, `group_${id}`);
 
         return response.send({
             ok: true,
@@ -265,6 +356,8 @@ router.post('/group/patch', async function (request, response) {
             integrity,
             force,
         });
+
+        triggerBackup(chatFilePath, request.user.profile.handle, request.user.directories.backups, `group_${id}`);
 
         return response.send({
             ok: true,
@@ -313,6 +406,8 @@ router.post('/group/meta/patch', async function (request, response) {
             integrity,
             force,
         });
+
+        triggerBackup(chatFilePath, request.user.profile.handle, request.user.directories.backups, `group_${id}`);
 
         return response.send({ ok: true, integrity: result.integrity });
     } catch (error) {

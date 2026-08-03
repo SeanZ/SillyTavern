@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import _ from 'lodash';
 import { validateIntegrity, readIntegrity, writeIntegrity, generateIntegrity } from './integrity.js';
+import { tryWriteFileSync } from '../util.js';
 
 /**
  * Reads the last non-empty line from a file without loading the entire file.
@@ -57,9 +58,11 @@ function stripTransientFields(msg) {
  * @param {object} [options.chatMetadata={}] - Metadata for header (used only on create).
  * @param {string} [options.integrity=''] - Client-provided integrity slug.
  * @param {boolean} [options.force=false] - Skip integrity check.
+ * @param {string} [options.generationId=''] - Client generation ID for retry dedup.
+ * @param {string} [options.lastKnownGenerationId=''] - Server's last-seen generation ID for this chat.
  * @returns {AppendResult}
  */
-export function appendMessages({ chatFilePath, messages, chatMetadata = {}, integrity = '', force = false }) {
+export function appendMessages({ chatFilePath, messages, chatMetadata = {}, integrity = '', force = false, generationId = '', lastKnownGenerationId = '' }) {
     if (!Array.isArray(messages) || messages.length === 0) {
         return { appended: 0, skipped: 0, created: false, integrity: '' };
     }
@@ -91,7 +94,7 @@ export function appendMessages({ chatFilePath, messages, chatMetadata = {}, inte
         };
 
         const lines = [header, ...messages].map(m => JSON.stringify(m)).join('\n');
-        fs.writeFileSync(chatFilePath, lines, 'utf8');
+        tryWriteFileSync(chatFilePath, lines);
 
         const newIntegrity = generateIntegrity();
         writeIntegrity(chatFilePath, newIntegrity);
@@ -114,17 +117,26 @@ export function appendMessages({ chatFilePath, messages, chatMetadata = {}, inte
 
     // Dedup loop: continuously drop leading messages that match the last stored
     // message (handles multi-message retry scenarios). Matches Luker's while-loop
-    // dedup pattern.
+    // dedup pattern. Two dedup layers:
+    //   1. Content equality (stripTransientFields comparison)
+    //   2. Generation ID match (if same gen ID arrives again within TTL, treat as retry)
     if (lastMessage) {
         const lastStripped = stripTransientFields(lastMessage);
         while (dedupedMessages.length > 0) {
             const firstNewStripped = stripTransientFields(dedupedMessages[0]);
+            // Layer 1: content equality
             if (_.isEqual(lastStripped, firstNewStripped)) {
                 dedupedMessages.shift();
                 skipped++;
-            } else {
-                break;
+                continue;
             }
+            // Layer 2: generation ID retry dedup
+            if (generationId && lastKnownGenerationId && generationId === lastKnownGenerationId) {
+                dedupedMessages.shift();
+                skipped++;
+                continue;
+            }
+            break;
         }
     }
 
@@ -134,9 +146,10 @@ export function appendMessages({ chatFilePath, messages, chatMetadata = {}, inte
         return { appended: 0, skipped, created: false, integrity: currentIntegrity };
     }
 
-    // Append to file
+    // Append to file (read + append + atomic write for crash safety)
     const serialized = dedupedMessages.map(m => JSON.stringify(m)).join('\n');
-    fs.appendFileSync(chatFilePath, '\n' + serialized, 'utf8');
+    const existingContent = fs.readFileSync(chatFilePath, 'utf8');
+    tryWriteFileSync(chatFilePath, existingContent + '\n' + serialized);
 
     // Rotate integrity
     const newIntegrity = generateIntegrity();

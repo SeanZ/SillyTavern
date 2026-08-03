@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { tryWriteFileSync } from '../util.js';
 
 /**
  * Derives the sidecar state file path from the chat JSONL path.
@@ -49,7 +50,7 @@ export function readIntegrity(chatFilePath) {
 export function writeIntegrity(chatFilePath, integrity) {
     const stateFile = getStateFilePath(chatFilePath);
     const data = { integrity, updated_at: Date.now() };
-    fs.writeFileSync(stateFile, JSON.stringify(data), 'utf8');
+    tryWriteFileSync(stateFile, JSON.stringify(data));
 }
 
 /**

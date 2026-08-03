@@ -9393,10 +9393,21 @@ export async function saveChatConditional() {
 
         isChatSaving = true;
 
-        if (selected_group) {
-            await saveGroupChat(selected_group, true);
+        // Synchronous snapshot: capture chat state BEFORE any async work
+        // to prevent concurrent mutations (streaming/swipe/plugins) from
+        // corrupting the save. Aligned with Luker's buildActiveChatSaveContext.
+        const saveContext = {
+            isGroup: Boolean(selected_group),
+            groupId: selected_group,
+            chatData: chat.slice(),
+            metadata: { ...chat_metadata },
+            characterId: this_chid,
+        };
+
+        if (saveContext.isGroup) {
+            await saveGroupChat(saveContext.groupId, true);
         } else {
-            await saveChat();
+            await saveChat({ chatData: saveContext.chatData, withMetadata: saveContext.metadata });
         }
 
         // Save token and prompts cache to IndexedDB storage
