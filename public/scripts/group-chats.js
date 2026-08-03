@@ -278,7 +278,7 @@ export async function getGroupChat(groupId, reload = false) {
     if (!metadata.integrity) {
         metadata.integrity = uuidv4();
     }
-    initIncrementalSave(metadata.integrity);
+    initIncrementalSave(metadata.integrity, Array.isArray(data) ? data.length : 0);
 
     await loadItemizedPrompts(getCurrentChatId());
 

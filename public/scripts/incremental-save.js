@@ -39,9 +39,12 @@ let enabled = true;
  * Initialize the integrity slug from chat_metadata when a chat is loaded.
  * Called once after /api/chats/get or /api/chats/group/get returns.
  * @param {string} [integrity] - The integrity slug from chat_metadata.
+ * @param {number} [chatLength=0] - Current chat.length at load time.
  */
-export function initIncrementalSave(integrity) {
+export function initIncrementalSave(integrity, chatLength = 0) {
     currentIntegrity = typeof integrity === 'string' ? integrity.trim() : '';
+    lastSavedChatLength = chatLength;
+    enabled = true; // Re-enable on chat switch (may have been disabled by 404)
 }
 
 /**
@@ -324,4 +327,78 @@ function applyIntegrity(integrity) {
     if (typeof integrity === 'string' && integrity.trim()) {
         currentIntegrity = integrity.trim();
     }
+}
+
+// ─── Intelligent Save Routing ───────────────────────────────────────────────
+
+/** @type {number} Chat length after last successful save (used to detect appends). */
+let lastSavedChatLength = 0;
+
+/**
+ * Notify the module that a full save completed successfully (from the legacy path).
+ * This keeps lastSavedChatLength in sync even when incremental save isn't used.
+ * @param {number} chatLength - Current chat.length after save.
+ * @param {string} [integrity] - Integrity slug if returned by the server.
+ */
+export function notifyFullSaveCompleted(chatLength, integrity) {
+    lastSavedChatLength = chatLength;
+    if (integrity) applyIntegrity(integrity);
+}
+
+/**
+ * Try to perform an incremental save based on what changed.
+ * Called from saveChatConditional() before the full-save fallback.
+ *
+ * Detection logic:
+ * - chat.length > lastSavedChatLength → messages were appended → use /append
+ * - chat.length < lastSavedChatLength → messages were deleted → use /patch (remove)
+ * - chat.length === lastSavedChatLength → message edited or metadata changed → full save
+ *   (field-level diff detection is too complex for Phase 1; leave for Phase 2)
+ *
+ * @param {object} params
+ * @param {object[]} params.chat - The current chat array.
+ * @param {object} params.chatMetadata - Current chat_metadata.
+ * @param {string} [params.avatarUrl] - Character avatar (for character chats).
+ * @param {string} [params.fileName] - Chat file name (for character chats).
+ * @param {string} [params.groupId] - Group chat ID (for group chats).
+ * @returns {Promise<boolean>} True if incremental save succeeded; false to fall through.
+ */
+export async function tryIncrementalSave({ chat, chatMetadata, avatarUrl, fileName, groupId }) {
+    if (!enabled) return false;
+    if (!chat || !Array.isArray(chat)) return false;
+
+    const currentLength = chat.length;
+    const context = { avatarUrl, fileName, groupId, chatMetadata };
+
+    // Case 1: Messages were appended (most common — AI reply or user send)
+    if (currentLength > lastSavedChatLength && lastSavedChatLength > 0) {
+        const newMessages = chat.slice(lastSavedChatLength);
+        const ok = await appendChatMessages(newMessages, context);
+        if (ok) {
+            lastSavedChatLength = currentLength;
+            return true;
+        }
+        return false;
+    }
+
+    // Case 2: Messages were deleted
+    if (currentLength < lastSavedChatLength && lastSavedChatLength > 0) {
+        // Deletion is complex to express as patch ops without knowing which
+        // messages were removed. Fall through to full save for now.
+        // After full save completes, lastSavedChatLength will be updated.
+        return false;
+    }
+
+    // Case 3: Same length — could be edit, swipe, or metadata-only change.
+    // Phase 1 doesn't do field-level diffing; fall through to full save.
+    // Future: compare chat[i] snapshots to generate targeted patch ops.
+    return false;
+}
+
+/**
+ * Reset tracking state (called when switching chats).
+ * @param {number} [chatLength=0]
+ */
+export function resetIncrementalState(chatLength = 0) {
+    lastSavedChatLength = chatLength;
 }

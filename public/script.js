@@ -286,7 +286,7 @@ import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { compressRequest, setRequestCompressionConfig } from './scripts/request-compression.js';
-import { initIncrementalSave, appendChatMessages, patchChatMessages, saveChatMetadataIncremental, isIncrementalSaveEnabled } from './scripts/incremental-save.js';
+import { initIncrementalSave, appendChatMessages, patchChatMessages, saveChatMetadataIncremental, isIncrementalSaveEnabled, tryIncrementalSave, notifyFullSaveCompleted, resetIncrementalState } from './scripts/incremental-save.js';
 import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
 // API OBJECT FOR EXTERNAL WIRING
@@ -7607,7 +7607,7 @@ export async function getChat() {
         if (!chat_metadata.integrity) {
             chat_metadata.integrity = uuidv4();
         }
-        initIncrementalSave(chat_metadata.integrity);
+        initIncrementalSave(chat_metadata.integrity, chat.length);
         await getChatResult();
         eventSource.emit(event_types.CHAT_LOADED, { detail: { id: this_chid, character: characters[this_chid] } });
 
@@ -9364,10 +9364,28 @@ export async function saveChatConditional() {
 
         isChatSaving = true;
 
-        if (selected_group) {
-            await saveGroupChat(selected_group, true);
-        } else {
-            await saveChat();
+        // Try incremental save first (append only new messages).
+        // Falls through to full save on failure or when not applicable.
+        const groupChatId = selected_group
+            ? groups.find(x => x.id == selected_group)?.chat_id
+            : undefined;
+        const incrementalContext = {
+            chat,
+            chatMetadata: chat_metadata,
+            avatarUrl: characters[this_chid]?.avatar,
+            fileName: characters[this_chid]?.chat,
+            groupId: groupChatId,
+        };
+        const incrementalOk = await tryIncrementalSave(incrementalContext);
+
+        if (!incrementalOk) {
+            // Fallback: full save (original behavior)
+            if (selected_group) {
+                await saveGroupChat(selected_group, true);
+            } else {
+                await saveChat();
+            }
+            notifyFullSaveCompleted(chat.length);
         }
 
         // Save token and prompts cache to IndexedDB storage
