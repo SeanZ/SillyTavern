@@ -58,3 +58,6 @@ public/scripts/extensions/third-party
 yarn.lock
 *.code-workspace
 test-results/
+
+# Private deployment notes (contains server info)
+docs/DEPLOYMENT_NOTES.md
