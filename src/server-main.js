@@ -239,7 +239,10 @@ app.get('/login', loginPageMiddleware);
 const webpackMiddleware = getWebpackServeMiddleware();
 app.use(webpackMiddleware);
 app.use(userCssMiddleware);
-app.use(express.static(path.join(serverDirectory, 'public'), {}));
+app.use(express.static(path.join(serverDirectory, 'public'), {
+    maxAge: '7d',       // Browser cache: 7 days for static assets
+    immutable: false,   // Allow revalidation after maxAge expires
+}));
 
 // Public API
 app.use('/api/users', usersPublicRouter);
