@@ -320,12 +320,23 @@ async function preSetupTasks() {
     const exitProcess = async () => {
         if (isExiting) return;
         isExiting = true;
-        await statsOnExit();
-        if (typeof cleanupPlugins === 'function') {
-            await cleanupPlugins();
+
+        // Hard deadline: force exit if cleanup takes too long or is blocked
+        const forceExitTimer = setTimeout(() => {
+            process.exit(1);
+        }, 5000);
+        forceExitTimer.unref();
+
+        try {
+            await statsOnExit();
+            if (typeof cleanupPlugins === 'function') {
+                await cleanupPlugins();
+            }
+            diskCache.dispose();
+            setWindowTitle(consoleTitle);
+        } catch {
+            // Cleanup failed — exit anyway
         }
-        diskCache.dispose();
-        setWindowTitle(consoleTitle);
         process.exit();
     };
 
@@ -333,7 +344,12 @@ async function preSetupTasks() {
     process.on('SIGINT', exitProcess);
     process.on('SIGTERM', exitProcess);
     process.on('uncaughtException', (err) => {
-        console.error('Uncaught exception:', err);
+        // Use a try/catch to prevent recursive exceptions when stderr pipe is broken
+        try {
+            console.error('Uncaught exception:', err);
+        } catch {
+            // stderr write failed (e.g. EPIPE) — cannot log, just exit
+        }
         exitProcess();
     });
 
